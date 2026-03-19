@@ -8,6 +8,7 @@ import threading
 import subprocess
 import concurrent.futures
 from imageio_ffmpeg import get_ffmpeg_exe
+import time  # <-- Yeh naya import add kiya hai retries ke liye (Time delay)
 
 # --- GOOGLE DRIVE IMPORTS ---
 from google.oauth2.credentials import Credentials
@@ -202,7 +203,8 @@ class ClipExtractorApp(ctk.CTk):
                 token.write(creds.to_json())
                 
         try:
-            service = build('drive', 'v3', credentials=creds)
+            # increased timeout for slower connections
+            service = build('drive', 'v3', credentials=creds, cache_discovery=False)
             return service
         except Exception as e:
             self.log(f"❌ Drive Service Error: {str(e)}")
@@ -358,30 +360,36 @@ class ClipExtractorApp(ctk.CTk):
                     extracted_clips += 1
                     self.log(f"✂️ BINGO! Saved '{clip_number_str} clip {base_video_name}.mp4'")
 
-                    # --- GOOGLE DRIVE AUTO-UPLOAD (Specific Folder) ---
+                    # --- GOOGLE DRIVE AUTO-UPLOAD (WITH RETRY SYSTEM) ---
                     if self.drive_service:
-                        self.log(f"☁️ Uploading '{clip_number_str} clip {base_video_name}.mp4' to Drive...")
-                        try:
-                            # UI box se folder ID uthao
-                            folder_id = self.entry_drive_folder.get().strip()
-                            
-                            file_metadata = {'name': os.path.basename(output_filename)}
-                            
-                            # Agar folder ID majood hai, toh usko metadata mein add karo
-                            if folder_id:
-                                file_metadata['parents'] = [folder_id]
+                        max_retries = 3
+                        for attempt in range(max_retries):
+                            try:
+                                self.log(f"☁️ Uploading to Drive (Attempt {attempt+1}/{max_retries})...")
+                                
+                                folder_id = self.entry_drive_folder.get().strip()
+                                file_metadata = {'name': os.path.basename(output_filename)}
+                                if folder_id:
+                                    file_metadata['parents'] = [folder_id]
 
-                            media = MediaFileUpload(output_filename, mimetype='video/mp4')
-                            
-                            uploaded_file = self.drive_service.files().create(
-                                body=file_metadata, 
-                                media_body=media, 
-                                fields='id'
-                            ).execute()
-                            
-                            self.log(f"✅ Uploaded Successfully! Drive File ID: {uploaded_file.get('id')}")
-                        except Exception as upload_err:
-                            self.log(f"❌ Upload Failed: {str(upload_err)}")
+                                # resumable=True laga diya hai taa ke connection stable rahay
+                                media = MediaFileUpload(output_filename, mimetype='video/mp4', resumable=True)
+                                
+                                uploaded_file = self.drive_service.files().create(
+                                    body=file_metadata, 
+                                    media_body=media, 
+                                    fields='id'
+                                ).execute()
+                                
+                                self.log(f"✅ Uploaded Successfully! Drive File ID: {uploaded_file.get('id')}")
+                                break  # Upload successful ho gaya, loop se bahar aa jao
+                                
+                            except Exception as upload_err:
+                                if attempt < max_retries - 1:
+                                    self.log(f"⚠️ Connection dropped! Retrying in 3 seconds...")
+                                    time.sleep(3) # 3 second wait kar ke dobara koshish karega
+                                else:
+                                    self.log(f"❌ Upload Failed after 3 attempts: {str(upload_err)}")
                     # --------------------------------------------------
 
             cap.release()
