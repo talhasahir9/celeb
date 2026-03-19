@@ -1,309 +1,306 @@
 import customtkinter as ctk
-import threading
-import os
+from tkinter import filedialog, messagebox
 import cv2
-import face_recognition
+from deepface import DeepFace
+import os
+import random
+import threading
 import subprocess
-import requests
-from duckduckgo_search import DDGS
-from tkinter import messagebox, filedialog
 import concurrent.futures
-import time
-import traceback
-import numpy as np
-from scipy.io import wavfile
+from imageio_ffmpeg import get_ffmpeg_exe
 
-ctk.set_appearance_mode("System")
+# Modern Theme Setup
+ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
-class AIClipperApp(ctk.CTk):
+class ClipExtractorApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("AI Master Clipper - Smart Spread Edition")
-        self.geometry("950x800")
+        self.title("AI Celeb Clip Extractor (Ultimate Batch Edition)")
+        self.geometry("750x850")
+
+        # Variables
+        self.video_paths = []
+        self.image_paths = []
+        self.output_folder = ""
         
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1) 
+        # Threading Controls
+        self.is_running = False
+        self.is_paused = False
+        self.pause_event = threading.Event()
+        self.pause_event.set()
 
-        os.makedirs("reference_images", exist_ok=True)
-        os.makedirs("clips", exist_ok=True)
+        # --- UI ELEMENTS ---
+        self.label_title = ctk.CTkLabel(self, text="🎬 AI Celeb Clip Extractor (Pro)", font=ctk.CTkFont(size=24, weight="bold"))
+        self.label_title.pack(pady=10)
 
-        self.selected_files = [] 
-        self.custom_face1 = None
-        self.custom_face2 = None
-        self.create_widgets()
+        # 1. Video Selection
+        self.btn_video = ctk.CTkButton(self, text="📂 Select Multiple Videos", command=self.select_videos)
+        self.btn_video.pack(pady=5)
+        self.lbl_video = ctk.CTkLabel(self, text="0 videos selected", text_color="gray")
+        self.lbl_video.pack()
 
-    def create_widgets(self):
-        # 1. Header
-        self.label_title = ctk.CTkLabel(self, text="AI Local Clipper (Audio Heatmap & Smart Spread)", font=ctk.CTkFont(size=22, weight="bold"))
-        self.label_title.grid(row=0, column=0, pady=10, sticky="ew")
+        # 2. Celeb Image Selection
+        self.btn_image = ctk.CTkButton(self, text="🖼️ Select Celeb Image(s)", command=self.select_images)
+        self.btn_image.pack(pady=5)
+        self.lbl_image = ctk.CTkLabel(self, text="0 images selected", text_color="gray")
+        self.lbl_image.pack()
 
-        # 2. Middle Section
-        self.mid_frame = ctk.CTkFrame(self)
-        self.mid_frame.grid(row=1, column=0, padx=20, pady=5, sticky="nsew")
-        self.mid_frame.grid_columnconfigure(0, weight=1)
-        self.mid_frame.grid_columnconfigure(1, weight=1)
-        self.mid_frame.grid_rowconfigure(0, weight=1)
+        # 3. Output Folder Selection
+        self.btn_output = ctk.CTkButton(self, text="📁 Select Output Folder", command=self.select_output)
+        self.btn_output.pack(pady=5)
+        self.lbl_output = ctk.CTkLabel(self, text="No folder selected", text_color="gray")
+        self.lbl_output.pack()
 
-        # --- Left: Video Selection ---
-        self.file_frame = ctk.CTkFrame(self.mid_frame)
-        self.file_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
-        
-        self.btn_browse = ctk.CTkButton(self.file_frame, text="📁 SELECT VIDEOS", command=self.browse_videos, fg_color="#1f538d")
-        self.btn_browse.pack(pady=10, padx=10, fill="x")
+        # 4. Settings (Naya Thread Control Add Kiya Hai)
+        self.frame_settings = ctk.CTkFrame(self)
+        self.frame_settings.pack(pady=10, padx=40, fill="x")
 
-        self.scroll_list = ctk.CTkScrollableFrame(self.file_frame, label_text="Selected Files")
-        self.scroll_list.pack(pady=5, fill="both", expand=True)
+        self.lbl_clips = ctk.CTkLabel(self.frame_settings, text="Clips per video:")
+        self.lbl_clips.grid(row=0, column=0, padx=20, pady=10)
+        self.entry_clips = ctk.CTkEntry(self.frame_settings, width=80)
+        self.entry_clips.insert(0, "5")
+        self.entry_clips.grid(row=0, column=1, padx=20, pady=10)
 
-        # --- Right: Settings & Faces ---
-        self.set_frame = ctk.CTkFrame(self.mid_frame)
-        self.set_frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+        self.lbl_duration = ctk.CTkLabel(self.frame_settings, text="Clip Duration (sec):")
+        self.lbl_duration.grid(row=1, column=0, padx=20, pady=10)
+        self.entry_duration = ctk.CTkEntry(self.frame_settings, width=80)
+        self.entry_duration.insert(0, "5.0")
+        self.entry_duration.grid(row=1, column=1, padx=20, pady=10)
 
-        ctk.CTkLabel(self.set_frame, text="AI SETTINGS", font=ctk.CTkFont(weight="bold")).pack(pady=5)
-        
-        # Face 1 Row
-        self.f1_frame = ctk.CTkFrame(self.set_frame, fg_color="transparent")
-        self.f1_frame.pack(pady=5, fill="x", padx=10)
-        self.entry_c1 = ctk.CTkEntry(self.f1_frame, placeholder_text="Celeb 1 Name", width=160)
-        self.entry_c1.pack(side="left", padx=5)
-        self.btn_f1 = ctk.CTkButton(self.f1_frame, text="📁 Photo", width=60, command=lambda: self.select_manual_face(1))
-        self.btn_f1.pack(side="left")
+        self.lbl_threads = ctk.CTkLabel(self.frame_settings, text="Max Threads (Simultaneous Videos):")
+        self.lbl_threads.grid(row=2, column=0, padx=20, pady=10)
+        self.entry_threads = ctk.CTkEntry(self.frame_settings, width=80)
+        self.entry_threads.insert(0, "2") # Default 2 videos ek sath
+        self.entry_threads.grid(row=2, column=1, padx=20, pady=10)
 
-        # Face 2 Row
-        self.f2_frame = ctk.CTkFrame(self.set_frame, fg_color="transparent")
-        self.f2_frame.pack(pady=5, fill="x", padx=10)
-        self.entry_c2 = ctk.CTkEntry(self.f2_frame, placeholder_text="Celeb 2 (Optional)", width=160)
-        self.entry_c2.pack(side="left", padx=5)
-        self.btn_f2 = ctk.CTkButton(self.f2_frame, text="📁 Photo", width=60, command=lambda: self.select_manual_face(2))
-        self.btn_f2.pack(side="left")
+        # 5. Control Buttons
+        self.frame_controls = ctk.CTkFrame(self, fg_color="transparent")
+        self.frame_controls.pack(pady=10)
 
-        # NEW: Clip Settings Row (Max Clips & Duration)
-        self.clip_set_frame = ctk.CTkFrame(self.set_frame, fg_color="transparent")
-        self.clip_set_frame.pack(pady=15, fill="x", padx=10)
-        
-        self.entry_max_clips = ctk.CTkEntry(self.clip_set_frame, placeholder_text="Max Clips (e.g. 5)", width=130)
-        self.entry_max_clips.pack(side="left", padx=5)
-        self.entry_max_clips.insert(0, "5") # Default 5 clips
+        self.btn_start = ctk.CTkButton(self.frame_controls, text="🚀 Start Batch", fg_color="green", hover_color="darkgreen", command=self.start_processing_thread)
+        self.btn_start.grid(row=0, column=0, padx=10)
 
-        self.entry_duration = ctk.CTkEntry(self.clip_set_frame, placeholder_text="Duration (sec)", width=130)
-        self.entry_duration.pack(side="left", padx=5)
-        self.entry_duration.insert(0, "15") # Default 15 sec duration
+        self.btn_pause = ctk.CTkButton(self.frame_controls, text="⏸️ Pause", fg_color="orange", hover_color="darkorange", state="disabled", command=self.toggle_pause)
+        self.btn_pause.grid(row=0, column=1, padx=10)
 
-        self.entry_work = ctk.CTkEntry(self.set_frame, placeholder_text="Workers (1-2)", width=270)
-        self.entry_work.pack(pady=10)
-        self.entry_work.insert(0, "1")
+        self.btn_stop = ctk.CTkButton(self.frame_controls, text="🛑 Stop", fg_color="red", hover_color="darkred", state="disabled", command=self.stop_processing)
+        self.btn_stop.grid(row=0, column=2, padx=10)
 
-        # 3. Progress Bar & Log Box
-        self.prog_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.prog_frame.grid(row=2, column=0, padx=20, pady=5, sticky="ew")
-        
-        self.prog_label = ctk.CTkLabel(self.prog_frame, text="Progress: 0%")
-        self.prog_label.pack(side="left", padx=5)
-        self.progress_bar = ctk.CTkProgressBar(self.prog_frame, width=600)
-        self.progress_bar.pack(side="left", fill="x", expand=True, padx=10)
+        # 6. Progress Bar & Live Status
+        self.progress_bar = ctk.CTkProgressBar(self, width=600)
+        self.progress_bar.pack(pady=10)
         self.progress_bar.set(0)
 
-        self.status_log = ctk.CTkTextbox(self, height=120)
-        self.status_log.grid(row=3, column=0, padx=20, pady=5, sticky="ew")
-        self.status_log.insert("0.0", "System Ready. Please set Max Clips and Clip Duration.\n")
+        self.lbl_status = ctk.CTkLabel(self, text="Status: Ready", text_color="yellow", font=ctk.CTkFont(size=14))
+        self.lbl_status.pack(pady=5)
 
-        # 4. START BUTTON
-        self.btn_start = ctk.CTkButton(self, text="🚀 START AI CLIPPING", command=self.start_thread, 
-                                       fg_color="#28a745", hover_color="#218838", height=50, 
-                                       font=ctk.CTkFont(size=18, weight="bold"))
-        self.btn_start.grid(row=4, column=0, padx=20, pady=10, sticky="ew")
+        # 7. Live Logs Screen
+        self.log_box = ctk.CTkTextbox(self, width=650, height=200, state="disabled", fg_color="#1e1e1e", text_color="#00ff00", font=ctk.CTkFont(family="Consolas", size=12))
+        self.log_box.pack(pady=10)
 
+    # --- UI UPDATE & LOGGING FUNCTIONS ---
     def log(self, text):
-        self.status_log.insert("end", text + "\n")
-        self.status_log.see("end")
-        self.update_idletasks()
+        self.after(0, self._safe_log, text)
 
-    def select_manual_face(self, num):
-        file = filedialog.askopenfilename(title=f"Select Photo for Celeb {num}", filetypes=[("Image Files", "*.jpg *.jpeg *.png")])
-        if file:
-            if num == 1:
-                self.custom_face1 = file
-                self.btn_f1.configure(text="✅ Loaded", fg_color="green")
-                self.log(f"✅ Manual photo loaded for Celeb 1: {os.path.basename(file)}")
-            else:
-                self.custom_face2 = file
-                self.btn_f2.configure(text="✅ Loaded", fg_color="green")
-                self.log(f"✅ Manual photo loaded for Celeb 2: {os.path.basename(file)}")
+    def _safe_log(self, text):
+        self.log_box.configure(state="normal")
+        self.log_box.insert(ctk.END, text + "\n")
+        self.log_box.see(ctk.END)
+        self.log_box.configure(state="disabled")
 
-    def browse_videos(self):
-        files = filedialog.askopenfilenames(title="Select Video Files", filetypes=[("Video Files", "*.mp4 *.mkv *.avi *.mov *.ts")])
-        if files:
-            self.selected_files = list(files)
-            for widget in self.scroll_list.winfo_children(): widget.destroy()
-            for path in self.selected_files:
-                ctk.CTkLabel(self.scroll_list, text=f"• {os.path.basename(path)}", anchor="w").pack(fill="x", padx=5)
-            self.log(f"✅ {len(self.selected_files)} videos selected.")
+    def update_progress(self, value):
+        self.after(0, lambda: self.progress_bar.set(value))
 
-    def start_thread(self):
-        if not self.selected_files:
-            messagebox.showerror("Error", "Pehle videos toh select karo!")
-            return
-        celeb = self.entry_c1.get().strip()
-        if not celeb and not self.custom_face1:
-            messagebox.showerror("Error", "Celeb 1 ka naam likho ya photo upload karo!")
+    def update_status(self, text):
+        self.after(0, lambda: self.lbl_status.configure(text=text))
+
+    # --- BUTTON FUNCTIONS ---
+    def select_videos(self):
+        paths = filedialog.askopenfilenames(filetypes=[("Video Files", "*.mp4 *.mkv *.avi")])
+        if paths:
+            self.video_paths = list(paths)
+            self.lbl_video.configure(text=f"{len(self.video_paths)} videos selected")
+
+    def select_images(self):
+        paths = filedialog.askopenfilenames(filetypes=[("Image Files", "*.jpg *.jpeg *.png *.webp")])
+        if paths:
+            self.image_paths = list(paths)
+            self.lbl_image.configure(text=f"{len(self.image_paths)} images selected")
+
+    def select_output(self):
+        self.output_folder = filedialog.askdirectory()
+        if self.output_folder:
+            self.lbl_output.configure(text=self.output_folder)
+
+    def toggle_pause(self):
+        if self.is_paused:
+            self.pause_event.set()
+            self.is_paused = False
+            self.btn_pause.configure(text="⏸️ Pause")
+            self.update_status("Status: Resumed...")
+            self.log("▶️ System Resumed...")
+        else:
+            self.pause_event.clear()
+            self.is_paused = True
+            self.btn_pause.configure(text="▶️ Resume")
+            self.update_status("Status: Paused...")
+            self.log("⏸️ System Paused... (Threads waiting)")
+
+    def stop_processing(self):
+        self.is_running = False
+        self.pause_event.set() 
+        self.update_status("Status: Stopping... Please wait.")
+        self.log("🛑 Stopping... (Waiting for current ongoing tasks to finish)")
+        self.btn_stop.configure(state="disabled")
+
+    def start_processing_thread(self):
+        if not self.video_paths or not self.image_paths or not self.output_folder:
+            messagebox.showerror("Error", "Please select Videos, Celeb Image(s), and Output Folder!")
             return
         
-        try:
-            max_clips = int(self.entry_max_clips.get().strip())
-            clip_dur = int(self.entry_duration.get().strip())
-        except:
-            messagebox.showerror("Error", "Max Clips aur Duration mein sirf numbers likhein!")
-            return
-        
-        self.btn_start.configure(state="disabled", text="AI IS SCANNING...")
+        self.is_running = True
+        self.is_paused = False
+        self.pause_event.set()
+
+        self.btn_start.configure(state="disabled")
+        self.btn_pause.configure(state="normal", text="⏸️ Pause")
+        self.btn_stop.configure(state="normal")
         self.progress_bar.set(0)
-        self.prog_label.configure(text="Progress: 0%")
-        threading.Thread(target=self.main_workflow, args=(int(self.entry_work.get()), celeb, self.entry_c2.get().strip(), max_clips, clip_dur), daemon=True).start()
+        self.log("🚀 Batch Processing Started!")
+        
+        threading.Thread(target=self.run_batch_processing).start()
 
-    def get_audio_peaks(self, video_path, top_n=15):
-        """Method A: Local Audio Heatmap Generator"""
-        self.log(f"🎧 Analyzing Audio Energy for {os.path.basename(video_path)}...")
-        temp_wav = f"temp_{os.path.basename(video_path)}.wav"
+    # --- CORE BATCH & MULTI-THREAD LOGIC ---
+    def run_batch_processing(self):
         try:
-            # Added -acodec pcm_s16le to ensure scipy can read it properly
-            subprocess.run(["ffmpeg", "-y", "-i", video_path, "-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le", temp_wav], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            max_threads = int(self.entry_threads.get())
+        except ValueError:
+            max_threads = 2 # Agar user ghalati se text likh de toh default 2 rahega
             
-            samplerate, data = wavfile.read(temp_wav)
-            window_size = samplerate * 2 # 2 second windows
+        total_videos = len(self.video_paths)
+        completed_videos = 0
+
+        self.log(f"⚡ Starting with {max_threads} parallel threads...")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_threads) as executor:
+            futures = {executor.submit(self.process_single_video, vid): vid for vid in self.video_paths}
             
-            energies = []
-            for i in range(0, len(data), window_size):
-                chunk = data[i:i+window_size]
-                energy = np.sqrt(np.mean(chunk.astype(float)**2))
-                energies.append((i // samplerate, energy))
+            for future in concurrent.futures.as_completed(futures):
+                if not self.is_running:
+                    break 
                 
-            energies.sort(key=lambda x: x[1], reverse=True)
+                completed_videos += 1
+                self.update_progress(completed_videos / total_videos)
+        
+        self.after(0, self.finish_processing)
+
+    def finish_processing(self):
+        self.is_running = False
+        self.btn_start.configure(state="normal")
+        self.btn_pause.configure(state="disabled")
+        self.btn_stop.configure(state="disabled")
+        self.update_status("Status: Ready")
+        self.log("✅ All tasks finished or stopped.")
+
+    # --- SINGLE VIDEO PROCESSING ---
+    def process_single_video(self, video_path):
+        try:
+            num_clips = int(self.entry_clips.get())
+            clip_duration = float(self.entry_duration.get())
+            duration_int = int(clip_duration) 
+
+            base_video_name = os.path.splitext(os.path.basename(video_path))[0]
+            ffmpeg_exe = get_ffmpeg_exe()
+            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
+            cap = cv2.VideoCapture(video_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            total_seconds = int(total_frames / fps)
             
-            peaks = []
-            for t, e in energies:
-                if not any(abs(t - pt) < 30 for pt in peaks): # Audio peaks ko alag alag rakhna
-                    peaks.append(t)
-                if len(peaks) >= top_n: break
+            all_seconds = list(range(0, total_seconds - duration_int))
+            random.shuffle(all_seconds)
+
+            extracted_clips = 0
+            self.log(f"🎬 Processing: {base_video_name}")
+            
+            for sec in all_seconds:
+                self.pause_event.wait()
+                if not self.is_running:
+                    break
+                if extracted_clips >= num_clips:
+                    break
                 
-            os.remove(temp_wav)
-            self.log(f"🔥 Found {len(peaks)} viral audio moments!")
-            return peaks
+                # Yeh line UI pe live dikhayegi ke kahan scanning ho rahi hai
+                self.update_status(f"Probing '{base_video_name[:15]}...' at {sec}s mark (Found: {extracted_clips}/{num_clips})")
+                
+                all_seconds_match = True
+                
+                for offset in range(duration_int):
+                    self.pause_event.wait()
+                    if not self.is_running:
+                        all_seconds_match = False
+                        break
+
+                    current_check_sec = sec + offset
+                    cap.set(cv2.CAP_PROP_POS_MSEC, current_check_sec * 1000)
+                    ret, frame = cap.read()
+                    
+                    if not ret:
+                        all_seconds_match = False
+                        break
+
+                    small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+                    gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
+                    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+                    
+                    targets_found_in_frame = set()
+                    
+                    if len(faces) > 0:
+                        face_crops = []
+                        for (x, y, w, h) in faces:
+                            orig_x, orig_y, orig_w, orig_h = x*2, y*2, w*2, h*2
+                            y1, y2 = max(0, orig_y-20), min(frame.shape[0], orig_y+orig_h+20)
+                            x1, x2 = max(0, orig_x-20), min(frame.shape[1], orig_x+orig_w+20)
+                            crop = frame[y1:y2, x1:x2]
+                            if crop.shape[0] > 0 and crop.shape[1] > 0:
+                                face_crops.append(crop)
+                        
+                        for target_idx, target_img_path in enumerate(self.image_paths):
+                            for f_crop in face_crops:
+                                try:
+                                    res = DeepFace.verify(img1_path=f_crop, img2_path=target_img_path, model_name="VGG-Face", enforce_detection=False)
+                                    if res["verified"]:
+                                        targets_found_in_frame.add(target_idx)
+                                        break 
+                                except:
+                                    continue
+                    
+                    if len(targets_found_in_frame) < len(self.image_paths):
+                        all_seconds_match = False
+                        break 
+                        
+                if all_seconds_match and self.is_running:
+                    clip_number_str = f"{extracted_clips + 1:02d}"
+                    output_filename = os.path.join(self.output_folder, f"{clip_number_str} clip {base_video_name}.mp4")
+                    
+                    command = [
+                        ffmpeg_exe, "-y", "-ss", str(sec), "-i", video_path, 
+                        "-t", str(clip_duration), "-c:v", "copy", "-c:a", "copy", output_filename
+                    ]
+                    
+                    subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    
+                    extracted_clips += 1
+                    self.log(f"✂️ BINGO! Saved '{clip_number_str} clip {base_video_name}.mp4'")
+
+            cap.release()
+
         except Exception as e:
-            self.log(f"⚠️ Audio analysis skipped: {str(e)}")
-            if os.path.exists(temp_wav): os.remove(temp_wav)
-            return []
-
-    def get_face_encoding(self, name, custom_path):
-        save_folder = os.path.join("reference_images", name.replace(' ', '_')) if name else "reference_images/custom"
-        os.makedirs(save_folder, exist_ok=True)
-        
-        encs = []
-        if custom_path and os.path.exists(custom_path):
-            img = face_recognition.load_image_file(custom_path)
-            e = face_recognition.face_encodings(img)
-            if e: encs.append(e[0])
-            return encs
-            
-        if len(os.listdir(save_folder)) == 0:
-            self.log(f"📥 Fetching faces for {name}...")
-            try:
-                with DDGS() as ddgs:
-                    results = list(ddgs.images(keywords=f"{name} face portrait", max_results=2))
-                    for i, res in enumerate(results):
-                        img_data = requests.get(res['image'], timeout=10).content
-                        with open(os.path.join(save_folder, f"face_{i}.jpg"), 'wb') as f: f.write(img_data)
-            except: self.log(f"⚠️ Face download fail for {name}.")
-            
-        for file in os.listdir(save_folder):
-            if file.lower().endswith(('.jpg', '.png', '.jpeg')):
-                img = face_recognition.load_image_file(os.path.join(save_folder, file))
-                e = face_recognition.face_encodings(img)
-                if e: encs.append(e[0])
-        return encs
-
-    def main_workflow(self, max_workers, celeb1, celeb2, max_clips, clip_dur):
-        try:
-            self.log("\n[STEP 1] Starting AI Engine & Faces...")
-            encs1 = self.get_face_encoding(celeb1, self.custom_face1)
-            encs2 = self.get_face_encoding(celeb2, self.custom_face2) if (celeb2 or self.custom_face2) else []
-
-            if not encs1:
-                self.log("❌ Error: Celeb 1 face missing or not detected.")
-                return
-
-            self.log(f"\n[STEP 2] Processing {len(self.selected_files)} Videos...")
-            
-            total_vids = len(self.selected_files)
-            
-            for index, path in enumerate(self.selected_files):
-                self.process_single_video(path, encs1, encs2, max_clips, clip_dur)
-                # Overall progress update
-                progress = (index + 1) / total_vids
-                self.progress_bar.set(progress)
-                self.prog_label.configure(text=f"Total Progress: {int(progress*100)}%")
-
-            self.log("\n🎉 ALL DONE! Check the 'clips' folder.")
-        except Exception:
-            self.log(f"❌ ERROR:\n{traceback.format_exc()}")
-        finally:
-            self.btn_start.configure(state="normal", text="🚀 START AI CLIPPING")
-            self.progress_bar.set(1)
-
-    def process_single_video(self, path, encs1, encs2, max_clips, clip_dur):
-        name = os.path.basename(path).split('.')[0]
-        
-        # 1. Get Viral Audio Peaks
-        audio_peaks = self.get_audio_peaks(path, top_n=max_clips + 5)
-        
-        self.log(f"🔍 Scanning Frames for: {name}...")
-        cap = cv2.VideoCapture(path)
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30
-        duration = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) / fps)
-        
-        saved, timestamps = 0, []
-        
-        # SMART SPREAD LOGIC:
-        # Pura video evenly divide karein taake clip har hissay se check ho. (Har 30s ke baad)
-        fallback_points = list(range(0, duration, 30))
-        
-        # Pehle Audio peaks check karega, agar wahan faces na miley toh fallback_points pe jayega
-        scan_points = audio_peaks + fallback_points
-        
-        # Minimum faasla 2 clips ke darmiyan (Taa ke ek hi minute mein saare clips na ban jayein)
-        min_gap = clip_dur + 30 
-        
-        for t in scan_points:
-            if saved >= max_clips: break 
-            if any(abs(t - st) < min_gap for st in timestamps): continue # Ensures clips are spread out!
-            if t >= duration: continue
-            
-            cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
-            ret, frame = cap.read()
-            if not ret: continue
-            
-            small_frame = cv2.resize(frame, (0,0), fx=0.4, fy=0.4)
-            rgb = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
-            f_encs = face_recognition.face_encodings(rgb, face_recognition.face_locations(rgb))
-            
-            found1 = any(any(face_recognition.compare_faces(encs1, fe, 0.55)) for fe in f_encs)
-            found2 = True if not encs2 else any(any(face_recognition.compare_faces(encs2, fe, 0.55)) for fe in f_encs)
-            
-            if found1 and found2:
-                # 2 second pehle se shuru karna taake reaction poora aaye
-                start_time = max(0, t - 2)
-                out = os.path.join("clips", f"{name}_clip_{saved+1}.mp4")
-                
-                # FFMPEG mein aapki di hui Clip Duration (clip_dur) use hogi
-                subprocess.run(["ffmpeg", "-y", "-ss", str(start_time), "-i", path, "-t", str(clip_dur), "-c:v", "libx264", "-c:a", "aac", out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                
-                timestamps.append(t)
-                saved += 1
-                self.log(f"✂️ Viral clip {saved}/{max_clips} saved at {int(t)}s (Duration: {clip_dur}s)")
-                
-        cap.release()
-        self.log(f"✅ Finished: {name}")
+            self.log(f"❌ Error in {video_path}: {str(e)}")
 
 if __name__ == "__main__":
-    app = AIClipperApp()
+    app = ClipExtractorApp()
     app.mainloop()
