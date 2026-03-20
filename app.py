@@ -8,10 +8,23 @@ import threading
 import subprocess
 import concurrent.futures
 from imageio_ffmpeg import get_ffmpeg_exe
+import time
+import gc
+
+# --- GOOGLE DRIVE IMPORTS ---
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.http import MediaFileUpload
+# ----------------------------
 
 # Modern Theme Setup
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
+
+# Google Drive Access Scope
+SCOPES = ['https://www.googleapis.com/auth/drive.file']
 
 class ClipExtractorApp(ctk.CTk):
     def __init__(self):
@@ -24,12 +37,16 @@ class ClipExtractorApp(ctk.CTk):
         self.video_paths = []
         self.image_paths = []
         self.output_folder = ""
+        self.drive_service = None 
         
-        # Threading Controls
+        # Threading & Crash Prevention Controls
         self.is_running = False
         self.is_paused = False
         self.pause_event = threading.Event()
         self.pause_event.set()
+        
+        # --- NAYA LOCK ---
+        self.ai_lock = threading.Lock()
 
         # --- UI ELEMENTS ---
         self.label_title = ctk.CTkLabel(self, text="🎬 AI Celeb Clip Extractor (Pro)", font=ctk.CTkFont(size=24, weight="bold"))
@@ -53,7 +70,7 @@ class ClipExtractorApp(ctk.CTk):
         self.lbl_output = ctk.CTkLabel(self, text="No folder selected", text_color="gray")
         self.lbl_output.pack()
 
-        # 4. Settings (Naya Thread Control Add Kiya Hai)
+        # 4. Settings
         self.frame_settings = ctk.CTkFrame(self)
         self.frame_settings.pack(pady=10, padx=40, fill="x")
 
@@ -72,8 +89,14 @@ class ClipExtractorApp(ctk.CTk):
         self.lbl_threads = ctk.CTkLabel(self.frame_settings, text="Max Threads (Simultaneous Videos):")
         self.lbl_threads.grid(row=2, column=0, padx=20, pady=10)
         self.entry_threads = ctk.CTkEntry(self.frame_settings, width=80)
-        self.entry_threads.insert(0, "2") # Default 2 videos ek sath
+        self.entry_threads.insert(0, "2")
         self.entry_threads.grid(row=2, column=1, padx=20, pady=10)
+
+        # Drive Folder ID
+        self.lbl_drive_folder = ctk.CTkLabel(self.frame_settings, text="Drive Folder ID (Optional):")
+        self.lbl_drive_folder.grid(row=3, column=0, padx=20, pady=10)
+        self.entry_drive_folder = ctk.CTkEntry(self.frame_settings, width=180, placeholder_text="Paste Folder ID here...")
+        self.entry_drive_folder.grid(row=3, column=1, padx=20, pady=10)
 
         # 5. Control Buttons
         self.frame_controls = ctk.CTkFrame(self, fg_color="transparent")
@@ -155,6 +178,40 @@ class ClipExtractorApp(ctk.CTk):
         self.log("🛑 Stopping... (Waiting for current ongoing tasks to finish)")
         self.btn_stop.configure(state="disabled")
 
+    # --- GOOGLE DRIVE SETUP FUNCTION ---
+    def setup_google_drive(self):
+        creds = None
+        if os.path.exists('token.json'):
+            creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+                
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                try:
+                    creds.refresh(Request())
+                except:
+                    pass
+            if not creds or not creds.valid:
+                if not os.path.exists('credentials.json'):
+                    self.log("⚠️ credentials.json not found! Google Drive upload skipped.")
+                    return None
+                try:
+                    self.log("🔑 Opening browser for Google Drive Authentication...")
+                    flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+                    creds = flow.run_local_server(port=0)
+                except Exception as e:
+                    self.log(f"❌ Google Auth Error: {str(e)}")
+                    return None
+            
+            with open('token.json', 'w') as token:
+                token.write(creds.to_json())
+                
+        try:
+            service = build('drive', 'v3', credentials=creds, cache_discovery=False)
+            return service
+        except Exception as e:
+            self.log(f"❌ Drive Service Error: {str(e)}")
+            return None
+
     def start_processing_thread(self):
         if not self.video_paths or not self.image_paths or not self.output_folder:
             messagebox.showerror("Error", "Please select Videos, Celeb Image(s), and Output Folder!")
@@ -168,16 +225,26 @@ class ClipExtractorApp(ctk.CTk):
         self.btn_pause.configure(state="normal", text="⏸️ Pause")
         self.btn_stop.configure(state="normal")
         self.progress_bar.set(0)
-        self.log("🚀 Batch Processing Started!")
         
-        threading.Thread(target=self.run_batch_processing).start()
+        self.log("⏳ Connecting to Google Drive...")
+        threading.Thread(target=self.init_drive_and_run).start()
+
+    def init_drive_and_run(self):
+        self.drive_service = self.setup_google_drive()
+        if self.drive_service:
+            self.log("✅ Google Drive Connected Successfully!")
+        else:
+            self.log("⚠️ Processing without Auto-Upload.")
+            
+        self.log("🚀 Batch Processing Started!")
+        self.run_batch_processing()
 
     # --- CORE BATCH & MULTI-THREAD LOGIC ---
     def run_batch_processing(self):
         try:
             max_threads = int(self.entry_threads.get())
         except ValueError:
-            max_threads = 2 # Agar user ghalati se text likh de toh default 2 rahega
+            max_threads = 2
             
         total_videos = len(self.video_paths)
         completed_videos = 0
@@ -206,10 +273,13 @@ class ClipExtractorApp(ctk.CTk):
 
     # --- SINGLE VIDEO PROCESSING ---
     def process_single_video(self, video_path):
+        cap = None
         try:
             num_clips = int(self.entry_clips.get())
             clip_duration = float(self.entry_duration.get())
             duration_int = int(clip_duration) 
+            
+            required_matches = 2 if duration_int >= 2 else 1
 
             base_video_name = os.path.splitext(os.path.basename(video_path))[0]
             ffmpeg_exe = get_ffmpeg_exe()
@@ -218,14 +288,55 @@ class ClipExtractorApp(ctk.CTk):
             cap = cv2.VideoCapture(video_path)
             fps = cap.get(cv2.CAP_PROP_FPS)
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            
+            if total_frames <= 0 or fps <= 0:
+                self.log(f"❌ Corrupt video or unreadable FPS: {base_video_name}")
+                return
+
             total_seconds = int(total_frames / fps)
+            if total_seconds <= duration_int:
+                self.log(f"⚠️ Video is too short: {base_video_name}")
+                return
             
             all_seconds = list(range(0, total_seconds - duration_int))
             random.shuffle(all_seconds)
 
             extracted_clips = 0
+            
+            # --- SKIP IRRELEVANT VIDEO LOGIC ---
+            consecutive_failures = 0
+            max_failures_allowed = 70
+            # -----------------------------------
+            
             self.log(f"🎬 Processing: {base_video_name}")
             
+            def check_celeb_at_second(target_sec):
+                cap.set(cv2.CAP_PROP_POS_MSEC, target_sec * 1000)
+                ret, frame = cap.read()
+                if not ret or frame is None: return False
+
+                small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+                gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
+                faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
+                
+                if len(faces) > 0:
+                    for (x, y, w, h) in faces:
+                        orig_x, orig_y, orig_w, orig_h = x*2, y*2, w*2, h*2
+                        y1, y2 = max(0, orig_y-20), min(frame.shape[0], orig_y+orig_h+20)
+                        x1, x2 = max(0, orig_x-20), min(frame.shape[1], orig_x+orig_w+20)
+                        crop = frame[y1:y2, x1:x2]
+                        
+                        if crop.shape[0] > 0 and crop.shape[1] > 0:
+                            for target_img_path in self.image_paths:
+                                try:
+                                    with self.ai_lock:
+                                        res = DeepFace.verify(img1_path=crop, img2_path=target_img_path, model_name="VGG-Face", enforce_detection=False)
+                                    if res["verified"]:
+                                        return True
+                                except Exception:
+                                    pass
+                return False
+
             for sec in all_seconds:
                 self.pause_event.wait()
                 if not self.is_running:
@@ -233,73 +344,85 @@ class ClipExtractorApp(ctk.CTk):
                 if extracted_clips >= num_clips:
                     break
                 
-                # Yeh line UI pe live dikhayegi ke kahan scanning ho rahi hai
                 self.update_status(f"Probing '{base_video_name[:15]}...' at {sec}s mark (Found: {extracted_clips}/{num_clips})")
                 
-                all_seconds_match = True
+                clip_extracted_in_this_sec = False
                 
-                for offset in range(duration_int):
-                    self.pause_event.wait()
-                    if not self.is_running:
-                        all_seconds_match = False
-                        break
+                if check_celeb_at_second(sec):
+                    matches_found = 1
+                    
+                    if required_matches > 1:
+                        for offset in range(1, duration_int):
+                            if not self.is_running: break
+                            if check_celeb_at_second(sec + offset):
+                                matches_found += 1
+                                if matches_found >= required_matches:
+                                    break 
 
-                    current_check_sec = sec + offset
-                    cap.set(cv2.CAP_PROP_POS_MSEC, current_check_sec * 1000)
-                    ret, frame = cap.read()
-                    
-                    if not ret:
-                        all_seconds_match = False
-                        break
-
-                    small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
-                    gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
-                    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-                    
-                    targets_found_in_frame = set()
-                    
-                    if len(faces) > 0:
-                        face_crops = []
-                        for (x, y, w, h) in faces:
-                            orig_x, orig_y, orig_w, orig_h = x*2, y*2, w*2, h*2
-                            y1, y2 = max(0, orig_y-20), min(frame.shape[0], orig_y+orig_h+20)
-                            x1, x2 = max(0, orig_x-20), min(frame.shape[1], orig_x+orig_w+20)
-                            crop = frame[y1:y2, x1:x2]
-                            if crop.shape[0] > 0 and crop.shape[1] > 0:
-                                face_crops.append(crop)
+                    if matches_found >= required_matches and self.is_running:
+                        clip_number_str = f"{extracted_clips + 1:02d}"
+                        output_filename = os.path.join(self.output_folder, f"{clip_number_str} clip {base_video_name}.mp4")
                         
-                        for target_idx, target_img_path in enumerate(self.image_paths):
-                            for f_crop in face_crops:
+                        command = [
+                            ffmpeg_exe, "-y", "-ss", str(sec), "-i", video_path, 
+                            "-t", str(clip_duration), "-c:v", "copy", "-c:a", "copy", output_filename
+                        ]
+                        
+                        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        
+                        extracted_clips += 1
+                        clip_extracted_in_this_sec = True # Kamyabi mil gayi!
+                        
+                        self.log(f"✂️ BINGO! Valid presence found. Saved '{clip_number_str} clip'")
+
+                        if self.drive_service:
+                            max_retries = 3
+                            for attempt in range(max_retries):
                                 try:
-                                    res = DeepFace.verify(img1_path=f_crop, img2_path=target_img_path, model_name="VGG-Face", enforce_detection=False)
-                                    if res["verified"]:
-                                        targets_found_in_frame.add(target_idx)
-                                        break 
-                                except:
-                                    continue
-                    
-                    if len(targets_found_in_frame) < len(self.image_paths):
-                        all_seconds_match = False
-                        break 
-                        
-                if all_seconds_match and self.is_running:
-                    clip_number_str = f"{extracted_clips + 1:02d}"
-                    output_filename = os.path.join(self.output_folder, f"{clip_number_str} clip {base_video_name}.mp4")
-                    
-                    command = [
-                        ffmpeg_exe, "-y", "-ss", str(sec), "-i", video_path, 
-                        "-t", str(clip_duration), "-c:v", "copy", "-c:a", "copy", output_filename
-                    ]
-                    
-                    subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    
-                    extracted_clips += 1
-                    self.log(f"✂️ BINGO! Saved '{clip_number_str} clip {base_video_name}.mp4'")
+                                    self.log(f"☁️ Uploading to Drive (Attempt {attempt+1}/{max_retries})...")
+                                    
+                                    folder_id = self.entry_drive_folder.get().strip()
+                                    file_metadata = {'name': os.path.basename(output_filename)}
+                                    if folder_id:
+                                        file_metadata['parents'] = [folder_id]
 
-            cap.release()
+                                    media = MediaFileUpload(output_filename, mimetype='video/mp4', resumable=True)
+                                    
+                                    uploaded_file = self.drive_service.files().create(
+                                        body=file_metadata, 
+                                        media_body=media, 
+                                        fields='id'
+                                    ).execute()
+                                    
+                                    self.log(f"✅ Uploaded Successfully! Drive File ID: {uploaded_file.get('id')}")
+                                    break 
+                                    
+                                except Exception as upload_err:
+                                    if attempt < max_retries - 1:
+                                        self.log(f"⚠️ Connection dropped! Retrying in 3 seconds...")
+                                        time.sleep(3)
+                                    else:
+                                        self.log(f"❌ Upload Failed after 3 attempts: {str(upload_err)}")
+
+                # --- FAIL COUNTER LOGIC ---
+                if clip_extracted_in_this_sec:
+                    consecutive_failures = 0  # Clip mil gayi toh counter reset
+                else:
+                    consecutive_failures += 1 # Clip nahi mili toh counter ++
+                    
+                if consecutive_failures >= max_failures_allowed:
+                    self.log(f"⏭️ Skipping '{base_video_name[:20]}...': No match found in {max_failures_allowed} attempts (Irrelevant video).")
+                    break # Loop break karo aur agli video par jao
+                # --------------------------
 
         except Exception as e:
             self.log(f"❌ Error in {video_path}: {str(e)}")
+            
+        finally:
+            if cap is not None:
+                cap.release()
+            cv2.destroyAllWindows()
+            gc.collect()
 
 if __name__ == "__main__":
     app = ClipExtractorApp()
