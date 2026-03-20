@@ -1,4 +1,4 @@
-pip install customtkinter opencv-python deepface imageio-ffmpeg pyinstaller
+pip install customtkinter opencv-python deepface imageio-ffmpeg pyinstaller tf-keras
 
 
 
