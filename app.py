@@ -45,7 +45,7 @@ class ClipExtractorApp(ctk.CTk):
         self.pause_event = threading.Event()
         self.pause_event.set()
         
-        # --- NAYA LOCK ---
+        # AI Lock
         self.ai_lock = threading.Lock()
 
         # --- UI ELEMENTS ---
@@ -236,6 +236,7 @@ class ClipExtractorApp(ctk.CTk):
         else:
             self.log("⚠️ Processing without Auto-Upload.")
             
+        self.log(f"🧠 Fast AI (Facenet) loaded with {len(self.image_paths)} reference image(s)!")
         self.log("🚀 Batch Processing Started!")
         self.run_batch_processing()
 
@@ -271,7 +272,7 @@ class ClipExtractorApp(ctk.CTk):
         self.update_status("Status: Ready")
         self.log("✅ All tasks finished or stopped.")
 
-    # --- SINGLE VIDEO PROCESSING ---
+    # --- SINGLE VIDEO PROCESSING (RANDOM SHUFFLE + 200 LIMIT) ---
     def process_single_video(self, video_path):
         cap = None
         try:
@@ -298,15 +299,16 @@ class ClipExtractorApp(ctk.CTk):
                 self.log(f"⚠️ Video is too short: {base_video_name}")
                 return
             
+            # Wapas RANDOM SHUFFLE par aa gaye hain!
             all_seconds = list(range(0, total_seconds - duration_int))
             random.shuffle(all_seconds)
 
             extracted_clips = 0
             
-            # --- SKIP IRRELEVANT VIDEO LOGIC ---
+            # --- 200 TRIES LIMIT COUNTER ---
             consecutive_failures = 0
-            max_failures_allowed = 70
-            # -----------------------------------
+            max_failures_allowed = 200
+            # -------------------------------
             
             self.log(f"🎬 Processing: {base_video_name}")
             
@@ -330,7 +332,7 @@ class ClipExtractorApp(ctk.CTk):
                             for target_img_path in self.image_paths:
                                 try:
                                     with self.ai_lock:
-                                        res = DeepFace.verify(img1_path=crop, img2_path=target_img_path, model_name="VGG-Face", enforce_detection=False)
+                                        res = DeepFace.verify(img1_path=crop, img2_path=target_img_path, model_name="Facenet", enforce_detection=False)
                                     if res["verified"]:
                                         return True
                                 except Exception:
@@ -371,7 +373,7 @@ class ClipExtractorApp(ctk.CTk):
                         subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                         
                         extracted_clips += 1
-                        clip_extracted_in_this_sec = True # Kamyabi mil gayi!
+                        clip_extracted_in_this_sec = True
                         
                         self.log(f"✂️ BINGO! Valid presence found. Saved '{clip_number_str} clip'")
 
@@ -404,16 +406,16 @@ class ClipExtractorApp(ctk.CTk):
                                     else:
                                         self.log(f"❌ Upload Failed after 3 attempts: {str(upload_err)}")
 
-                # --- FAIL COUNTER LOGIC ---
+                # --- 200 TRIES COUNTER LOGIC ---
                 if clip_extracted_in_this_sec:
                     consecutive_failures = 0  # Clip mil gayi toh counter reset
                 else:
                     consecutive_failures += 1 # Clip nahi mili toh counter ++
                     
                 if consecutive_failures >= max_failures_allowed:
-                    self.log(f"⏭️ Skipping '{base_video_name[:20]}...': No match found in {max_failures_allowed} attempts (Irrelevant video).")
-                    break # Loop break karo aur agli video par jao
-                # --------------------------
+                    self.log(f"⏭️ Skipping '{base_video_name[:20]}...': No match found in {max_failures_allowed} random attempts.")
+                    break # Loop se bahar aa jayega, agli video start hogi
+                # -------------------------------
 
         except Exception as e:
             self.log(f"❌ Error in {video_path}: {str(e)}")
