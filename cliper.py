@@ -2,148 +2,123 @@ import customtkinter as ctk
 from tkinter import filedialog, messagebox
 import subprocess
 import os
-import imageio_ffmpeg  # Nayi library import ki
+import imageio_ffmpeg
+from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
+from googleapiclient.http import MediaFileUpload
 
-# Theme aur UI setup
+# UI Setup
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
-class ProVideoClipper(ctk.CTk):
+class AutomationApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Pro Video Clipper Dashboard")
-        self.geometry("600x550")
-        self.resizable(False, False)
+        self.title("Jamo's Video Automation Tool")
+        self.geometry("700x600")
         
-        self.input_video_path = None
-        self.output_folder_path = None
+        # Tabs Create Kar Rahe Hain
+        self.tabview = ctk.CTkTabview(self, width=650, height=550)
+        self.tabview.pack(padx=20, pady=20)
+        
+        self.tab_clip = self.tabview.add("Video Clipper")
+        self.tab_drive = self.tabview.add("Google Drive Uploader")
+        
+        self.setup_clipper_ui()
+        self.setup_drive_ui()
 
-        # --- Title ---
-        self.title_label = ctk.CTkLabel(self, text="✂️ Video Clipper Dashboard", font=ctk.CTkFont(size=24, weight="bold"))
-        self.title_label.pack(pady=(20, 20))
+    # ================= CLIPPER LOGIC =================
+    def setup_clipper_ui(self):
+        self.input_video = None
+        self.output_folder = None
 
-        # --- File Selection Section ---
-        self.file_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.file_frame.pack(fill="x", padx=40, pady=10)
+        ctk.CTkLabel(self.tab_clip, text="✂️ Video Clipper", font=("Arial", 20, "bold")).pack(pady=10)
+        
+        self.btn_in = ctk.CTkButton(self.tab_clip, text="Select Video", command=self.select_video)
+        self.btn_in.pack(pady=5)
+        self.lbl_in = ctk.CTkLabel(self.tab_clip, text="No file selected", text_color="gray")
+        self.lbl_in.pack()
 
-        # Input Video
-        self.btn_input = ctk.CTkButton(self.file_frame, text="1. Select Video File", command=self.select_input_video, width=200)
-        self.btn_input.grid(row=0, column=0, pady=10, sticky="w")
-        self.lbl_input = ctk.CTkLabel(self.file_frame, text="No video selected...", text_color="gray", width=300, anchor="w")
-        self.lbl_input.grid(row=0, column=1, padx=20, pady=10)
+        ctk.CTkLabel(self.tab_clip, text="Start Time (HH:MM:SS):").pack(pady=(10,0))
+        self.ent_start = ctk.CTkEntry(self.tab_clip, placeholder_text="00:00:00")
+        self.ent_start.pack()
 
-        # Output Folder
-        self.btn_output = ctk.CTkButton(self.file_frame, text="2. Select Output Folder", command=self.select_output_folder, width=200)
-        self.btn_output.grid(row=1, column=0, pady=10, sticky="w")
-        self.lbl_output = ctk.CTkLabel(self.file_frame, text="No folder selected...", text_color="gray", width=300, anchor="w")
-        self.lbl_output.grid(row=1, column=1, padx=20, pady=10)
+        ctk.CTkLabel(self.tab_clip, text="End Time (HH:MM:SS):").pack(pady=(10,0))
+        self.ent_end = ctk.CTkEntry(self.tab_clip, placeholder_text="00:00:10")
+        self.ent_end.pack()
 
-        # --- Timestamps Section ---
-        self.time_frame = ctk.CTkFrame(self)
-        self.time_frame.pack(pady=20, padx=40, fill="x")
+        self.btn_cut = ctk.CTkButton(self.tab_clip, text="Cut Video", fg_color="green", command=self.process_cut)
+        self.btn_cut.pack(pady=20)
 
-        self.time_title = ctk.CTkLabel(self.time_frame, text="Set Timestamps (HH:MM:SS)", font=ctk.CTkFont(weight="bold"))
-        self.time_title.grid(row=0, column=0, columnspan=2, pady=(10, 5))
+    def select_video(self):
+        path = filedialog.askopenfilename(filetypes=[("Video", "*.mp4 *.mkv")])
+        if path:
+            self.input_video = path
+            self.lbl_in.configure(text=os.path.basename(path), text_color="white")
 
-        # Start Time
-        self.lbl_start = ctk.CTkLabel(self.time_frame, text="Start Time:")
-        self.lbl_start.grid(row=1, column=0, padx=(30, 10), pady=10, sticky="e")
-        self.entry_start = ctk.CTkEntry(self.time_frame, placeholder_text="00:00:00", width=150, justify="center")
-        self.entry_start.grid(row=1, column=1, padx=(0, 30), pady=10)
+    def process_cut(self):
+        if not self.input_video: return
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        out_path = self.input_video.replace(".mp4", "_cut.mp4")
+        
+        cmd = [ffmpeg_exe, "-i", self.input_video, "-ss", self.ent_start.get(), "-to", self.ent_end.get(), "-c", "copy", "-y", out_path]
+        subprocess.run(cmd)
+        messagebox.showinfo("Done", f"Video Saved: {out_path}")
 
-        # End Time
-        self.lbl_end = ctk.CTkLabel(self.time_frame, text="End Time:")
-        self.lbl_end.grid(row=2, column=0, padx=(30, 10), pady=(0, 20), sticky="e")
-        self.entry_end = ctk.CTkEntry(self.time_frame, placeholder_text="00:00:00", width=150, justify="center")
-        self.entry_end.grid(row=2, column=1, padx=(0, 30), pady=(0, 20))
+    # ================= DRIVE UPLOADER LOGIC =================
+    def setup_drive_ui(self):
+        ctk.CTkLabel(self.tab_drive, text="☁️ Drive Uploader", font=("Arial", 20, "bold")).pack(pady=10)
 
-        # --- Process Section ---
-        self.btn_process = ctk.CTkButton(self, text="Start Processing", command=self.process_video, 
-                                         fg_color="#28a745", hover_color="#218838", 
-                                         height=45, font=ctk.CTkFont(size=16, weight="bold"))
-        self.btn_process.pack(pady=(10, 10))
+        ctk.CTkLabel(self.tab_drive, text="Enter Google Drive Folder ID:").pack(pady=(10,0))
+        self.ent_folder_id = ctk.CTkEntry(self.tab_drive, width=400, placeholder_text="Paste Folder ID here...")
+        self.ent_folder_id.pack(pady=5)
 
-        # Status Label
-        self.lbl_status = ctk.CTkLabel(self, text="", text_color="white", font=ctk.CTkFont(size=14))
-        self.lbl_status.pack()
+        self.btn_sel_drive = ctk.CTkButton(self.tab_drive, text="Select File to Upload", command=self.select_drive_file)
+        self.btn_sel_drive.pack(pady=10)
+        self.lbl_drive_file = ctk.CTkLabel(self.tab_drive, text="No file selected", text_color="gray")
+        self.lbl_drive_file.pack()
 
-    def select_input_video(self):
-        file_path = filedialog.askopenfilename(title="Select Video", filetypes=[("Video Files", "*.mp4 *.mkv *.avi *.mov")])
-        if file_path:
-            self.input_video_path = file_path
-            self.lbl_input.configure(text=self.truncate_path(file_path), text_color="white")
-            
-            if not self.output_folder_path:
-                self.output_folder_path = os.path.dirname(file_path)
-                self.lbl_output.configure(text=self.truncate_path(self.output_folder_path), text_color="white")
+        self.btn_upload = ctk.CTkButton(self.tab_drive, text="Upload to Drive", fg_color="#1f538d", command=self.upload_to_drive)
+        self.btn_upload.pack(pady=20)
+        
+        self.status_drive = ctk.CTkLabel(self.tab_drive, text="")
+        self.status_drive.pack()
 
-    def select_output_folder(self):
-        folder_path = filedialog.askdirectory(title="Select Output Folder")
-        if folder_path:
-            self.output_folder_path = folder_path
-            self.lbl_output.configure(text=self.truncate_path(folder_path), text_color="white")
+    def select_drive_file(self):
+        self.upload_file_path = filedialog.askopenfilename()
+        if self.upload_file_path:
+            self.lbl_drive_file.configure(text=os.path.basename(self.upload_file_path), text_color="white")
 
-    def truncate_path(self, path, max_length=35):
-        if len(path) > max_length:
-            return "..." + path[-(max_length-3):]
-        return path
-
-    def process_video(self):
-        if not self.input_video_path:
-            messagebox.showerror("Error", "Bhai pehle Video toh select karo!")
+    def upload_to_drive(self):
+        folder_id = self.ent_folder_id.get().strip()
+        if not folder_id or not hasattr(self, 'upload_file_path'):
+            messagebox.showerror("Error", "Folder ID aur File dono zaroori hain!")
             return
-        if not self.output_folder_path:
-            messagebox.showerror("Error", "Output folder select nahi kiya!")
-            return
-
-        start_time = self.entry_start.get().strip()
-        end_time = self.entry_end.get().strip()
-
-        if not start_time or not end_time:
-            messagebox.showerror("Error", "Start aur End time dono daalna zaroori hai (Format: 00:00:00)")
-            return
-
-        base_name = os.path.basename(self.input_video_path)
-        name, ext = os.path.splitext(base_name)
-        output_file_name = f"{name}_cut{ext}"
-        output_full_path = os.path.join(self.output_folder_path, output_file_name)
 
         try:
-            self.lbl_status.configure(text="Preparing FFmpeg...", text_color="yellow")
+            self.status_drive.configure(text="Uploading...", text_color="yellow")
             self.update()
 
-            # Yahan hum imageio-ffmpeg se exe ka path le rahe hain
-            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            # token.json se authenticate karna
+            creds = Credentials.from_authorized_user_file('token.json', ['https://www.googleapis.com/auth/drive.file'])
+            service = build('drive', 'v3', credentials=creds)
 
-            # Command mein ab 'ffmpeg' ki jagah seedha us exe ka path jayega
-            command = [
-                ffmpeg_exe,
-                "-i", self.input_video_path,
-                "-ss", start_time,
-                "-to", end_time,
-                "-c", "copy",
-                "-y",  
-                output_full_path
-            ]
-
-            self.lbl_status.configure(text="Cutting video, please wait...")
-            self.update()
-
-            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
-            if result.returncode == 0:
-                self.lbl_status.configure(text=f"✅ Video Saved Successfully!\nPath: {output_full_path}", text_color="#28a745")
-                messagebox.showinfo("Success", f"Video cut ho kar yahan save ho gayi hai:\n{self.output_folder_path}")
-            else:
-                self.lbl_status.configure(text="❌ Error occurred!", text_color="red")
-                print("FFmpeg Error:", result.stderr)
-                messagebox.showerror("Error", "Video cut nahi ho saki. Time format check karein (00:00:00).")
-
+            file_metadata = {
+                'name': os.path.basename(self.upload_file_path),
+                'parents': [folder_id]
+            }
+            media = MediaFileUpload(self.upload_file_path, resumable=True)
+            
+            file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+            
+            self.status_drive.configure(text=f"✅ Uploaded! ID: {file.get('id')}", text_color="green")
+            messagebox.showinfo("Success", "File Drive par upload ho gayi!")
+            
         except Exception as e:
-            messagebox.showerror("System Error", f"Kuch masla ho gaya: {str(e)}")
-            self.lbl_status.configure(text="Error processing video!", text_color="red")
+            self.status_drive.configure(text="❌ Upload Failed", text_color="red")
+            messagebox.showerror("Error", str(e))
 
 if __name__ == "__main__":
-    app = ProVideoClipper()
+    app = AutomationApp()
     app.mainloop()
